@@ -162,6 +162,41 @@ python onion_collector.py \
     --timeout 60
 ```
 
+### Download just ONE file (no crawling at all)
+
+If you already know the exact file URL, `--single-file` skips crawling
+entirely and downloads only that one URL — still resumable, hash-verified,
+and logged/manifested the same as a full run:
+
+```bash
+python onion_collector.py \
+    --url "http://xxxxx.onion/e4d2e6cbb9dfa25ebc7b4caf0266bb60/MCDCSRVFS01/127.0.0.1/D:/Fejal/Maceio/Almoxarifado/AGENDA%20DOS%20TRANSPORTES/PLANILHA%20CONTROLE%20DE%20DEMANDAS/AGENDA%20TRANSPORTE%20Elias%2018.xlsx" \
+    --output "./evidence_case" \
+    --proxy "socks5h://127.0.0.1:9050" \
+    --single-file
+```
+
+### Restrict the crawl to one company/host subfolder
+
+By default (`--restrict-to-start`, on unless you disable it), the crawler
+only follows links whose path falls **under** the folder you start it at
+— it will never wander into a sibling folder elsewhere on the same onion
+host. So to collect only the `MCDCSRVFS01` machine's files and nothing
+else exposed on the same leak site, start the crawl there instead of at
+the site root:
+
+```bash
+python onion_collector.py \
+    --url "http://xxxxx.onion/e4d2e6cbb9dfa25ebc7b4caf0266bb60/MCDCSRVFS01/" \
+    --output "./evidence_case" \
+    --proxy "socks5h://127.0.0.1:9050"
+```
+
+Any link the crawler encounters that points outside that subtree (a
+different machine name, a sibling company's folder, etc.) is logged as
+"Out-of-scope link ignored" and never fetched. If you ever want the old
+whole-host behavior back, add `--no-restrict-to-start`.
+
 ### Resume after an interruption
 
 Just re-run the exact same command. The tool automatically detects the
@@ -187,12 +222,15 @@ python onion_collector.py \
 | `--workers` | `2` | Concurrent worker threads |
 | `--delay` | `1.0` | Seconds between requests, per worker |
 | `--retries` | `5` | Max retries per file (exponential backoff: 2s,4s,8s,16s,32s) |
-| `--timeout` | `60` | Per-request timeout (seconds) |
+| `--timeout` | `60` | Per-request connect timeout (seconds) |
+| `--stall-timeout` | `300` | Max seconds a single chunk-read may stall mid-download before retrying (raise this on very slow Tor circuits) |
 | `--resume` | off | Explicit resume flag (resume is automatic regardless) |
 | `--max-files` | none | Stop after N files downloaded |
 | `--max-size` | none | Stop after N bytes downloaded (e.g. `10GB`) |
 | `--dry-run` | off | Crawl/report only, no downloads |
 | `--test-tor` | off | Test connectivity to `--url` through the proxy, then exit |
+| `--single-file` | off | Download only the exact file at `--url`; no crawling |
+| `--restrict-to-start` / `--no-restrict-to-start` | on | Only follow links under the `--url` starting subtree |
 
 ---
 
@@ -258,6 +296,38 @@ adversary-controlled leak site could execute embedded malicious content.
 ---
 
 ## 7. Troubleshooting
+
+**Progress appears completely frozen (same Discovered/Downloaded/Failed
+numbers repeating forever)**
+- This is almost always a Tor circuit stall combined with a known
+  `PySocks` limitation: the SOCKS5 library `requests` uses to talk to
+  Tor doesn't always honor the `timeout=` value once a circuit stalls,
+  so the underlying socket can block far longer than `--timeout` — even
+  indefinitely. With a small worker count, just 1–2 stuck sockets is
+  enough to halt all visible progress (stats only update when an item
+  finishes, so a stuck item shows up as nothing changing at all).
+- The tool includes a hard wall-clock watchdog (independent of
+  `requests`/PySocks) around every request's connect phase (`--timeout`
+  + 20s), and a separate, more generous watchdog around each individual
+  chunk of a streamed download (`--stall-timeout`, default 300s), since
+  Tor circuits can be legitimately very slow — a few KB/s is common —
+  and a too-short stall allowance would kill downloads that were
+  actually still progressing, just slowly. You'll see periodic
+  `... still receiving <url>: N bytes so far` heartbeat lines in
+  `crawler.log` for a large file that's genuinely still coming in, and
+  a `watchdog timeout exceeded` line only when a socket has truly gone
+  silent for the full window.
+- If you still see it stall for many minutes with no watchdog message
+  and no heartbeat lines at all in `crawler.log`, check whether Tor's
+  circuit itself has died: `curl --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip`.
+  If that also hangs, restart the `tor` service (`sudo systemctl restart tor`)
+  and simply re-run the same command — the crawl resumes exactly where
+  it left off.
+- If a specific onion path consistently times out while others work
+  fine, that's more likely real server-side throttling/blocking on that
+  path rather than a generic Tor stall — try requesting a fresh Tor
+  circuit (`SIGNAL NEWNYM` via the control port, or restart the `tor`
+  service) and/or increase `--delay`.
 
 **SOCKS5 connection errors ("Failed to establish a new connection", proxy
 refused)**
